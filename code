@@ -1,0 +1,389 @@
+
+
+import os
+import re
+import cv2
+#from openai import OpenAI
+import faiss
+#import openai
+import random
+import pytesseract
+import pdfplumber
+import pyttsx3
+import langdetect
+import phonenumbers
+import pandas as pd
+import speech_recognition as sr
+import sqlite3
+import requests
+import dateparser
+import numpy as np
+from PIL import Image
+from deepface import DeepFace
+from sentence_transformers import SentenceTransformer
+from tkinter import filedialog, messagebox
+import tkinter as tk
+from email_validator import validate_email, EmailNotValidError
+
+#client = OpenAI()
+# Initialize APIs and Engines
+#client = OpenAI(api_key="-----")
+
+
+API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-base"
+headers = {"Authorization": "Bearer -------"}
+
+'''headers = {
+    "Authorization": "Bearer --------"
+}
+HUGGINGFACE_API_TOKEN = "-------"  # 🔁 Paste your actual token here
+API_URL = "https://api-inference.huggingface.co/models/meta-llama/Llama-2-7b-chat-hf"
+HEADERS = {
+    "Authorization": f"Bearer {HUGGINGFACE_API_TOKEN}"
+}'''
+speak = pyttsx3.init()
+speech_recognizer = sr.Recognizer()
+conn = sqlite3.connect('interview_data.db')
+cursor = conn.cursor()
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+cursor.execute('''CREATE TABLE IF NOT EXISTS candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT,
+                    position TEXT,
+                    resume_path TEXT,
+                    resume_photo_path TEXT,
+                    emotion TEXT,
+                    response TEXT,
+                    score REAL,
+                    selected BOOLEAN)''')
+
+# FAISS Index for profile matching
+index = faiss.IndexFlatL2(384)  # 384 for MiniLM
+templates = ["Highly skilled software engineer", "Creative marketing manager", "Efficient operations lead"]
+template_embeddings = model.encode(templates)
+index.add(np.array(template_embeddings))
+
+# --- Utility Functions ---
+def read_resume(file_path):
+    text = ''
+    with pdfplumber.open(file_path) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                text += t
+    return text
+
+def validate_resume_email(resume_text):
+    emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', resume_text)
+    return [email for email in emails if validate_email_safe(email)]
+
+def validate_email_safe(email):
+    try:
+        validate_email(email)
+        return True
+    except EmailNotValidError:
+        return False
+
+def parse_dates(text):
+    return [str(dateparser.parse(match)) for match in re.findall(r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b', text)]
+
+def detect_language(text):
+    try:
+        return langdetect.detect(text)
+    except:
+        return "Unknown"
+
+def extract_phone_numbers(text):
+    return [match.number for match in phonenumbers.PhoneNumberMatcher(text, "IN")]
+
+'''def generate_interview_question(resume_text):
+    prompt = f"Generate an interview question based on this resume:\n{resume_text[:1500]}"
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",  # or "gpt-4" if you have access
+        messages=[
+            {"role": "system", "content": "You are a helpful interviewer."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=50
+    )
+    return response.choices[0].message.content.strip()'''
+
+'''def generate_interview_question(resume_text):
+    prompt = f"Based on this resume, generate one technical interview question:\n\n{resume_text}"
+    payload = {"inputs": prompt}
+
+    response = requests.post(API_URL, headers=HEADERS, json=payload)
+    
+    if response.status_code != 200:
+        raise Exception(f"Request failed: {response.status_code} - {response.text}")
+    
+    result = response.json()
+    return result[0]['generated_text'] if isinstance(result, list) else result'''
+def generate_interview_question(resume_text):
+    prompt = f"Generate an interview question based on this resume: {resume_text}"
+    payload = {"inputs": prompt}
+
+    response = requests.post(API_URL, headers=headers, json=payload)
+
+    if response.status_code != 200:
+        raise Exception(f"Request failed: {response.status_code} - {response.text}")
+
+    result = response.json()
+
+    try:
+        return result[0]["generated_text"]
+    except (IndexError, KeyError):
+        return "Could not generate a valid question."
+
+'''def score_response_with_feedback(question, response):
+    prompt = f"Interview Question: {question}\nCandidate Answer: {response}\nGive a score out of 10 with 1-sentence feedback."
+    res = openai.Completion.create(engine="text-davinci-003", prompt=prompt, max_tokens=50)
+    feedback = res.choices[0].text.strip()
+    score_match = re.search(r'(\d+(\.\d+)?)', feedback)
+    score = float(score_match.group(1)) if score_match else 0
+    return score, feedback'''
+
+def score_response_with_feedback(question, answer):
+    # Your Hugging Face API Token
+    hf_token = "-------"
+    
+    # Model name
+    model = "google/flan-t5-base"
+
+    # Construct the evaluation prompt
+    prompt = f"""Question: {question}
+Answer: {answer}
+Evaluate the answer on a scale of 1 to 10 and provide brief feedback:"""
+
+    # API request to Hugging Face Inference Endpoint
+    url = f"https://api-inference.huggingface.co/models/{model}"
+    headers = {
+        "Authorization": f"Bearer {hf_token}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "inputs": prompt,
+        "options": {
+            "wait_for_model": True
+        }
+    }
+
+    response = requests.post(url, headers=headers, json=data)
+
+    if response.status_code != 200:
+        raise Exception(f"HuggingFace API failed: {response.status_code} - {response.text}")
+
+    result = response.json()
+
+    # The model returns a list of generated text
+    output = result[0]["generated_text"] if isinstance(result, list) and "generated_text" in result[0] else "No feedback"
+
+    # Basic score extraction (optional)
+    score = "N/A"
+    for word in output.split():
+        if word.strip().isdigit():
+            score = word
+            break
+
+    return score, output
+
+def listen_to_speech():
+    with sr.Microphone() as source:
+        print("Listening...")
+        audio = speech_recognizer.listen(source)
+        try:
+            return speech_recognizer.recognize_google(audio)
+        except:
+            return "Speech Recognition Failed"
+
+def detect_emotion():
+    cap = cv2.VideoCapture(0)
+    ret, frame = cap.read()
+    cap.release()
+    if not ret:
+        return "No Face Detected"
+    try:
+        result = DeepFace.analyze(frame, actions=['emotion'], enforce_detection=False)
+        return result[0]['dominant_emotion']
+    except:
+        return "Emotion Detection Failed"
+
+def compare_faces(uploaded_image_path, resume_photo_path):
+    try:
+        result = DeepFace.verify(uploaded_image_path, resume_photo_path, enforce_detection=False)
+        return result['verified']
+    except:
+        return False
+
+def match_profile_to_template(resume_text):
+    embedding = model.encode([resume_text])
+    D, I = index.search(np.array(embedding), 1)
+    return templates[I[0][0]]
+
+def store_data(name, position, resume_path, resume_photo_path, emotion, response, score):
+    try:
+        selected = float(score) >= 7
+    except ValueError:
+        selected = False
+    #selected = True if score >= 7 else False
+    #selected = True if int(score) >= 7 else False
+
+    cursor.execute("INSERT INTO candidates (name, position, resume_path, resume_photo_path, emotion, response, score, selected) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                   (name, position, resume_path, resume_photo_path, emotion, response, score, selected))
+    conn.commit()
+
+# --- GUI ---
+class InterviewApp:
+    def __init__(self, root):
+        HR_QUESTIONS = [
+            "Tell me about yourself.",
+            "Why do you want to work here?",
+            "What are your strengths and weaknesses?",
+            "Where do you see yourself in 5 years?",
+            "Describe a challenging situation and how you overcame it.",
+            "Why should we hire you?",
+            "How do you handle conflict at work?",
+            "Tell me about a time you showed leadership.",
+            "What motivates you?",
+            "Describe your ideal work environment.",
+            "How do you manage stress?",
+            "What is your greatest professional achievement?",
+            "How do you handle criticism?",
+            "What’s your management style?",
+            "Describe a failure you’ve had and what you learned.",
+            "What are your salary expectations?",
+            "Are you a team player?",
+            "What makes you unique?",
+            "What do you know about our company?",
+            "When can you start?"
+        ]
+
+        TECHNICAL_QUESTIONS = [
+            "Explain OOP concepts.",
+            "What is a database transaction?",
+            "What is normalization in DBMS?",
+            "Explain the OSI model.",
+            "What is a deadlock? How to prevent it?",
+            "Describe multithreading.",
+            "Difference between TCP and UDP?",
+            "What are JOINs in SQL?",
+            "Explain how hash maps work.",
+            "What is polymorphism?",
+            "What are REST APIs?",
+            "Explain version control.",
+            "What is Git branching?",
+            "Difference between compiler and interpreter?",
+            "What are the SOLID principles?",
+            "What is recursion?",
+            "What is memory management in C?",
+            "What is JVM?",
+            "What is Big O notation?",
+            "Explain exception handling."
+        ]
+
+        GENERAL_QUESTIONS = [
+            "What are your hobbies?",
+            "How do you spend your weekends?",
+            "Tell me about a recent news article you found interesting.",
+            "Who is your role model?",
+            "What do you do to stay updated with industry trends?",
+            "How do you balance personal and professional life?",
+            "Describe a recent book or movie you liked.",
+            "What languages do you speak?",
+            "What does success mean to you?",
+            "How do you define integrity?",
+            "What are your views on remote work?",
+            "Describe your daily routine.",
+            "What is your opinion on AI?",
+            "What do you do when you feel demotivated?",
+            "What social causes do you care about?",
+            "How do you manage time?",
+            "Do you prefer working alone or in a team?",
+            "What is your dream job?",
+            "How do you improve your skills?",
+            "What makes a great leader?"
+        ]
+
+        self.hr_questions = random.sample(HR_QUESTIONS, len(HR_QUESTIONS))
+        self.tech_questions = random.sample(TECHNICAL_QUESTIONS, len(TECHNICAL_QUESTIONS))
+        self.general_questions = random.sample(GENERAL_QUESTIONS, len(GENERAL_QUESTIONS))
+
+        self.hr_index = 4
+        self.tech_index = 4
+        self.general_index = 2
+
+        self.root = root
+        self.root.title("AI-Powered Smart Interview System")
+
+        tk.Label(root, text="Name:").pack()
+        self.name_entry = tk.Entry(root)
+        self.name_entry.pack()
+
+        tk.Label(root, text="Position:").pack()
+        self.position_entry = tk.Entry(root)
+        self.position_entry.pack()
+
+        tk.Button(root, text="Upload Resume", command=self.upload_resume).pack()
+        tk.Button(root, text="Upload Photo", command=self.upload_photo).pack()
+        tk.Button(root, text="Start Interview", command=self.start_interview).pack()
+        tk.Button(root, text="Show Selected", command=self.show_selected).pack()
+
+    def upload_resume(self):
+        self.resume_path = filedialog.askopenfilename(filetypes=[("PDF Files", "*.pdf")])
+
+    def upload_photo(self):
+        self.uploaded_photo_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.jpg;*.png")])
+
+    def start_interview(self):
+        name = self.name_entry.get()
+        position = self.position_entry.get()
+
+        if not all([name, position, hasattr(self, 'resume_path'), hasattr(self, 'uploaded_photo_path')]):
+            messagebox.showerror("Missing Info", "All fields are required")
+            return
+
+        resume_text = read_resume(self.resume_path)  
+    
+        domain = position.lower()
+        if "hr" in domain and self.hr_index < len(self.hr_questions):
+            question = self.hr_questions[self.hr_index]
+            self.hr_index += 1
+        elif "tech" in domain and self.tech_index < len(self.tech_questions):
+            question = self.tech_questions[self.tech_index]
+            self.tech_index += 1
+        elif "general" in domain and self.general_index < len(self.general_questions):
+            question = self.general_questions[self.general_index]
+            self.general_index += 1
+        else:
+        # Resume-based fallback if domain not recognized or exhausted
+            question = generate_interview_question(resume_text)
+    
+        speak.say(f"Hello {name}, here is your question: {question}")
+        speak.runAndWait()
+
+
+        response = listen_to_speech()
+        emotion = detect_emotion()
+        score, feedback = score_response_with_feedback(question, response)
+        face_verified = compare_faces(self.uploaded_photo_path, self.uploaded_photo_path)
+        matched_profile = match_profile_to_template(resume_text)
+
+        store_data(name, position, self.resume_path, self.uploaded_photo_path, emotion, response, score)
+
+        messagebox.showinfo("Done", f"Interview Complete.\nEmotion: {emotion}\nScore: {score}/10\nMatched Profile: {matched_profile}\nFeedback: {feedback}\nFace Verified: {face_verified}")
+
+    def show_selected(self):
+        #cursor.execute("SELECT name, position, score FROM candidates WHERE selected = 1")
+        cursor.execute("SELECT name, position FROM candidates WHERE selected = 1")
+
+        result = cursor.fetchall()
+        if not result:
+            messagebox.showinfo("No Selection", "No candidates selected yet.")
+        else:
+            info = "\n".join([f"{r[0]} - {r[1]} - Score: {r[2]}" for r in result])
+            messagebox.showinfo("Selected Candidates", info)
+
+root = tk.Tk()
+app = InterviewApp(root)
+root.mainloop()
