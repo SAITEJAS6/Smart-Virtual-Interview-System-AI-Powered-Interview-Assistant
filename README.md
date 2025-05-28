@@ -1,6 +1,6 @@
 # Smart-Virtual-Interview-System-AI-Powered-Interview-Assistant
 
-Project Overview 
+Project Overview  
 The Smart Virtual Interview System is an AI-based application designed to facilitate job interview preparation through an interactive voice-based interface. The system allows users to practice answering interview questions, receive real-time feedback, and track their progress over time. This project aims to improve the interview skills and confidence of job seekers by simulating a real interview environment using speech recognition and natural language processing technologies.
 
 Key Features
